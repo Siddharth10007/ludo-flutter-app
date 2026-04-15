@@ -2,9 +2,9 @@ import 'package:flutter/material.dart';
 import '../models/player.dart';
 import '../models/token.dart';
 import '../utils/constants.dart';
+import 'dart:math';
 
 class GameState extends ChangeNotifier {
-  // ── State ─────────────────────────────────────────────────────────────────
   late List<Player> players;
   int currentPlayerIndex = 0;
   int diceValue = 1;
@@ -13,7 +13,6 @@ class GameState extends ChangeNotifier {
   String statusMessage = '';
   bool gameOver = false;
 
-  // ── Initialise ────────────────────────────────────────────────────────────
   void initGame(int numPlayers) {
     players = List.generate(
       numPlayers,
@@ -30,18 +29,20 @@ class GameState extends ChangeNotifier {
 
   Player get currentPlayer => players[currentPlayerIndex];
 
-  // ── Roll dice ─────────────────────────────────────────────────────────────
+  // ── Dice roll ─────────────────────────────────────────────────────────────
+
   void rollDice() {
     if (hasDiceBeenRolled || gameOver) return;
-    diceValue = (DateTime.now().millisecondsSinceEpoch % 6) + 1;
+
+    // Use a better random source
+    final random = Random();
+    diceValue = random.nextInt(6) + 1;
     hasDiceBeenRolled = true;
 
-    // Check if any move is possible
     if (!_hasAnyValidMove(currentPlayer, diceValue)) {
       statusMessage =
-      '${currentPlayer.name}: rolled $diceValue – no valid move, turn skipped.';
+      '${currentPlayer.name}: rolled $diceValue – no valid move, skipping.';
       notifyListeners();
-      // auto-advance after brief pause (caller calls advanceTurn)
       Future.delayed(const Duration(milliseconds: 900), () {
         _advanceTurn(bonusTurn: false);
       });
@@ -53,76 +54,92 @@ class GameState extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ── Move a token ──────────────────────────────────────────────────────────
+  // ── Move token ────────────────────────────────────────────────────────────
+
   void moveToken(int playerIdx, int tokenIdx) {
     if (!hasDiceBeenRolled || gameOver) return;
     if (playerIdx != currentPlayerIndex) return;
 
     final player = players[playerIdx];
-    final token = player.tokens[tokenIdx];
+    final token  = player.tokens[tokenIdx];
 
     if (!_isValidMove(player, token, diceValue)) return;
 
-    // --- Apply move ---
     if (token.isHome) {
-      // Enter board: place at player's entry position
+      // Enter the board at this player's entry square
       token.position = kEntryPositions[playerIdx];
     } else {
-      token.position += diceValue;
-      // Clamp: cannot exceed 57 (last home-column cell before finish)
-      if (token.position > 57) {
-        token.position -= diceValue; // revert – over-shoot not allowed
-        statusMessage = 'Cannot move that token – would overshoot home!';
-        notifyListeners();
-        return;
-      }
-      if (token.position == 57) {
-        token.position = 58; // mark finished
+      // Relative progress from this player's entry square (0–51 on main track)
+      final int relPos = _relativePosition(playerIdx, token.position);
+
+      if (relPos + diceValue >= 52) {
+        // Token entering / moving through home column
+        final int homeStep = relPos + diceValue - 52; // 0 = first home-col square
+        if (homeStep > 5) {
+          statusMessage = 'Cannot move – would overshoot home!';
+          notifyListeners();
+          return;
+        }
+        token.position = 52 + homeStep;
+        if (token.position == 57) {
+          token.position = 58; // finished
+        }
+      } else {
+        // Still on main track – advance absolute position, wrap at 52
+        token.position = (token.position + diceValue) % kMainPathLength;
       }
     }
 
-    // --- Check for capture ---
     bool captured = false;
     if (token.isOnBoard) {
       captured = _handleCapture(playerIdx, token);
     }
 
-    // --- Check win ---
     if (player.checkWin()) {
       winnerName = player.name;
-      gameOver = true;
+      gameOver   = true;
       statusMessage = '🎉 ${player.name} wins!';
       notifyListeners();
       return;
     }
 
-    // --- Decide next turn ---
     bool bonusTurn = (diceValue == 6) || captured;
-    // Note: in many Ludo variants a capture also grants an extra turn.
+    hasDiceBeenRolled = false;
     statusMessage = bonusTurn
         ? '${currentPlayer.name} gets a bonus turn!'
-        : '';
-    hasDiceBeenRolled = false;
+        : '${currentPlayer.name}\'s turn done.';
     notifyListeners();
 
     _advanceTurn(bonusTurn: bonusTurn);
   }
 
-  // ── Capture logic ─────────────────────────────────────────────────────────
-  // Returns true if at least one opponent token was sent home.
+  // ── Relative position helper ──────────────────────────────────────────────
+  //
+  // Returns how many steps this token has advanced from its player's entry
+  // square on the main track (0–51).  Should only be called when the token
+  // is on the main track (position 0–51).
+
+  int _relativePosition(int playerIdx, int absPos) {
+    // If the token is already in the home column, return a value ≥ 52
+    if (absPos >= 52) return absPos; // caller should not call this branch
+    final entry = kEntryPositions[playerIdx];
+    return (absPos - entry + kMainPathLength) % kMainPathLength;
+  }
+
+  // ── Capture ───────────────────────────────────────────────────────────────
+
   bool _handleCapture(int attackerPlayerIdx, Token attacker) {
-    // Only main track positions can be captures (pos 0-51).
     if (attacker.position > 51) return false;
-    // Safe zone? No capture allowed.
     if (kSafePositions.contains(attacker.position)) return false;
 
     bool captured = false;
     for (final opponent in players) {
       if (opponent.index == attackerPlayerIdx) continue;
       for (final ot in opponent.tokens) {
-        if (ot.isOnBoard && ot.position == attacker.position && ot.position <= 51) {
-          // Opponent is on main track at same square → send home
-          ot.position = -1;
+        if (ot.isOnBoard &&
+            ot.position == attacker.position &&
+            ot.position <= 51) {
+          ot.position = -1; // send home
           captured = true;
         }
       }
@@ -131,6 +148,7 @@ class GameState extends ChangeNotifier {
   }
 
   // ── Advance turn ──────────────────────────────────────────────────────────
+
   void _advanceTurn({required bool bonusTurn}) {
     hasDiceBeenRolled = false;
     if (!bonusTurn) {
@@ -146,38 +164,32 @@ class GameState extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ── Validity helpers ──────────────────────────────────────────────────────
+  // ── Validity checks ───────────────────────────────────────────────────────
+
   bool _hasAnyValidMove(Player player, int dice) {
     return player.tokens.any((t) => _isValidMove(player, t, dice));
   }
 
   bool _isValidMove(Player player, Token token, int dice) {
     if (token.isFinished) return false;
+    if (token.isHome)     return dice == 6;
 
-    if (token.isHome) {
-      // Can only leave home on a 6
-      return dice == 6;
+    // Inside home column
+    if (token.position >= 52) {
+      final homeStep = token.position - 52; // 0–5
+      return homeStep + dice <= 5;
     }
 
-    // On board
-    int newPos = token.position + dice;
-    if (newPos > 57) return false; // would overshoot
-
-    // In home column – no captures, always valid if no overshoot
-    if (token.position >= 52) return true;
-
-    // On main track
-    // Check if landing on own token that's blocking (stacking rules: simple
-    // Ludo allows stacking, so we allow it – only block if all 4 own tokens
-    // already there, which is practically impossible in normal play).
+    // On main track – check for overshoot into home column
+    final relPos  = _relativePosition(player.index, token.position);
+    final newRel  = relPos + dice;
+    // After 52 relative steps the token enters home column (6 squares)
+    if (newRel > 57) return false; // would overshoot past finish
     return true;
   }
 
-  // ── Absolute board position → pixel offset ────────────────────────────────
-  // Returns the Offset for drawing a token given:
-  //  • its absolute position (–1 = base, 0-51 = main, 52-57 = home column, 58 = finished)
-  //  • the board pixel size
-  //  • a small sub-offset to avoid overlap when multiple tokens share a cell
+  // ── Token offset (pixel centre on board) ─────────────────────────────────
+
   Offset getTokenOffset(Token token, double boardSize, {int subIndex = 0}) {
     final int playerIdx = token.playerIndex;
 
@@ -187,16 +199,15 @@ class GameState extends ChangeNotifier {
     }
 
     if (token.isFinished) {
-      // All finished tokens cluster in the centre
+      // Cluster finished tokens around the board centre
       final centre = Offset(boardSize / 2, boardSize / 2);
-      final offsets = [
-        const Offset(-8, -8), const Offset(8, -8),
-        const Offset(-8, 8), const Offset(8, 8),
+      const offsets = [
+        Offset(-9, -9), Offset(9, -9),
+        Offset(-9,  9), Offset(9,  9),
       ];
       return centre + offsets[token.tokenIndex];
     }
 
-    // Home column (52-57)
     if (token.position >= 52) {
       final col = buildHomeColumnPath(playerIdx, boardSize);
       final idx = (token.position - 52).clamp(0, col.length - 1);
@@ -205,26 +216,19 @@ class GameState extends ChangeNotifier {
 
     // Main track
     final mainPath = buildMainPath(boardSize);
-    // Translate absolute position to player-relative index then back
-    final absPos = _absoluteToMainIndex(playerIdx, token.position);
-    final base = mainPath[absPos.clamp(0, mainPath.length - 1)];
+    final base     = mainPath[token.position.clamp(0, mainPath.length - 1)];
 
-    // Slight stagger so stacked tokens are visible
-    final stagger = [
-      const Offset(0, 0), const Offset(5, 0),
-      const Offset(0, 5), const Offset(5, 5),
+    // Slight stagger when multiple tokens share a square
+    const stagger = [
+      Offset(0, 0), Offset(5, 0),
+      Offset(0, 5), Offset(5, 5),
     ];
     return base + stagger[token.tokenIndex];
   }
 
-  // Convert a player's token position (0-51 = absolute main track index).
-  // In our scheme position IS already the absolute index, so no conversion needed.
-  int _absoluteToMainIndex(int playerIdx, int pos) => pos;
-
-  // ── Public helper: is this token tappable right now? ─────────────────────
   bool canMoveToken(int playerIdx, int tokenIdx) {
     if (!hasDiceBeenRolled || gameOver) return false;
-    if (playerIdx != currentPlayerIndex) return false;
+    if (playerIdx != currentPlayerIndex)  return false;
     final token = players[playerIdx].tokens[tokenIdx];
     return _isValidMove(players[playerIdx], token, diceValue);
   }

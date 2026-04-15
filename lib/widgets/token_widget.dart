@@ -18,24 +18,42 @@ class TokenWidget extends StatelessWidget {
       onTap: canMove ? onTap : null,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        width: 20,
-        height: 20,
+        width: 22,
+        height: 22,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: color,
+          // Slightly lighter inner fill + coloured border for a 3-D look
+          gradient: RadialGradient(
+            center: const Alignment(-0.3, -0.3),
+            colors: [
+              Color.lerp(color, Colors.white, 0.45)!,
+              color,
+            ],
+          ),
           border: Border.all(
             color: canMove ? Colors.white : Colors.black45,
-            width: canMove ? 2.5 : 1.0,
+            width: canMove ? 2.5 : 1.2,
           ),
           boxShadow: canMove
               ? [
             BoxShadow(
-              color: Colors.white.withOpacity(0.6),
-              blurRadius: 6,
+              color: Colors.white.withOpacity(0.7),
+              blurRadius: 8,
               spreadRadius: 1,
             ),
+            BoxShadow(
+              color: color.withOpacity(0.6),
+              blurRadius: 4,
+              spreadRadius: 0,
+            ),
           ]
-              : null,
+              : [
+            BoxShadow(
+              color: Colors.black38,
+              blurRadius: 3,
+              offset: const Offset(1, 1),
+            ),
+          ],
         ),
       ),
     );
